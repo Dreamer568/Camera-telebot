@@ -1,10 +1,10 @@
-
 import React, { useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
   FlatList,
   Image,
+  Platform,
   Pressable,
   SafeAreaView,
   StatusBar,
@@ -15,11 +15,14 @@ import {
 import { CameraView, useCameraPermissions } from "expo-camera";
 import * as ImagePicker from "expo-image-picker";
 
-const API_URL = "https://YOUR-RENDER-SERVICE.onrender.com";
+// ==========================================
+// CONFIGURATION
+// ==========================================
+const API_URL = "https://camera-telebot.onrender.com";
 
-// Prototype only: this key can be extracted from a mobile app.
-// Never put your Telegram token or Supabase service key here.
-const UPLOAD_KEY = "YOUR_UPLOAD_KEY";
+// Make sure this matches your Render Environment Variable UPLOAD_KEY exactly!
+const UPLOAD_KEY = "544aa0c35f1ab66261dea41c050f5935267fb878edd5c85fef6961979f55c8e5";
+// ==========================================
 
 type CloudImage = {
   sha256: string;
@@ -53,7 +56,7 @@ export default function App() {
       if (!cameraRef.current) return;
 
       const result = await cameraRef.current.takePictureAsync({
-        quality: 1,
+        quality: 0.9,
       });
 
       if (result?.uri) {
@@ -73,7 +76,7 @@ export default function App() {
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ["images"],
       allowsEditing: false,
-      quality: 1,
+      quality: 0.9,
     });
 
     if (result.canceled || !result.assets[0]) return;
@@ -81,13 +84,8 @@ export default function App() {
     const asset = result.assets[0];
     const mimeType = asset.mimeType || "image/jpeg";
 
-    if (
-      !["image/jpeg", "image/png", "image/webp"].includes(mimeType)
-    ) {
-      Alert.alert(
-        "Unsupported image",
-        "Choose a JPEG, PNG or WebP image."
-      );
+    if (!["image/jpeg", "image/png", "image/webp"].includes(mimeType)) {
+      Alert.alert("Unsupported image", "Choose a JPEG, PNG or WebP image.");
       return;
     }
 
@@ -95,8 +93,8 @@ export default function App() {
       mimeType === "image/png"
         ? "png"
         : mimeType === "image/webp"
-          ? "webp"
-          : "jpg";
+        ? "webp"
+        : "jpg";
 
     setPhoto({
       uri: asset.uri,
@@ -112,44 +110,56 @@ export default function App() {
     if (!photo || loading) return;
 
     setLoading(true);
-    setMessage("Saving image...");
+    setMessage("Uploading to Telegram...");
 
     try {
       const form = new FormData();
 
-      form.append(
-        "photo",
-        {
-          uri: photo.uri,
-          name: photo.name,
-          type: photo.mimeType,
-        } as any
-      );
+      // Normalize file URI format across iOS and Android
+      let fileUri = photo.uri;
+      if (Platform.OS === "ios" && !fileUri.startsWith("file://")) {
+        fileUri = `file://${fileUri}`;
+      }
 
+      form.append("photo", {
+        uri: fileUri,
+        name: photo.name || `image-${Date.now()}.jpg`,
+        type: photo.mimeType || "image/jpeg",
+      } as any);
+
+      // Do NOT set "Content-Type". Let fetch generate the multipart boundary.
       const response = await fetch(`${API_URL}/upload`, {
         method: "POST",
-        headers,
+        headers: {
+          "x-upload-key": UPLOAD_KEY,
+        },
         body: form,
       });
 
-      const data = await response.json();
+      const data = await response.json().catch(() => null);
 
       if (!response.ok) {
         throw new Error(
-          data.error || "Could not save the image."
+          data?.error ||
+            data?.detail ||
+            `Server returned status ${response.status}`
         );
       }
 
       setMessage(
         data.duplicate
-          ? "This exact image is already saved."
+          ? "Duplicate detected: already indexed ✓"
           : "Saved to Telegram ✓"
       );
 
       await loadCloudGallery(false);
-    } catch (error) {
+    } catch (error: any) {
+      console.error("Upload error details:", error);
+      const isNetworkError = error?.message?.includes("fetch failed");
       setMessage(
-        error instanceof Error ? error.message : "Upload failed."
+        isNetworkError
+          ? "Fetch failed: Render is waking up or URL/Key is incorrect."
+          : error.message || "Upload failed."
       );
     } finally {
       setLoading(false);
@@ -160,10 +170,9 @@ export default function App() {
     setLoadingGallery(true);
 
     try {
-      const response = await fetch(
-        `${API_URL}/images?limit=50`,
-        { headers }
-      );
+      const response = await fetch(`${API_URL}/images?limit=50`, {
+        headers,
+      });
 
       const data = await response.json();
 
@@ -172,13 +181,11 @@ export default function App() {
       }
 
       setCloudImages(data.images || []);
-    } catch (error) {
+    } catch (error: any) {
       if (showErrors) {
         Alert.alert(
           "Gallery",
-          error instanceof Error
-            ? error.message
-            : "Could not load gallery."
+          error instanceof Error ? error.message : "Could not load gallery."
         );
       }
     } finally {
@@ -202,15 +209,12 @@ export default function App() {
   if (!permission.granted) {
     return (
       <View style={styles.center}>
-        <Text style={styles.title}>Camera</Text>
+        <Text style={styles.title}>Camera Access Required</Text>
         <Text style={styles.secondary}>
-          Camera permission is required.
+          We need your permission to access the camera to snap pictures.
         </Text>
-        <Pressable
-          style={styles.primaryButton}
-          onPress={requestPermission}
-        >
-          <Text style={styles.primaryText}>Allow camera</Text>
+        <Pressable style={styles.primaryButton} onPress={requestPermission}>
+          <Text style={styles.primaryText}>Grant Permission</Text>
         </Pressable>
       </View>
     );
@@ -220,6 +224,7 @@ export default function App() {
     <SafeAreaView style={styles.root}>
       <StatusBar barStyle="light-content" backgroundColor="#000" />
 
+      {/* App Header */}
       <View style={styles.header}>
         <Text style={styles.title}>
           {screen === "camera" ? "Camera" : "Library"}
@@ -235,19 +240,17 @@ export default function App() {
           }}
         >
           <Text style={styles.link}>
-            {screen === "camera" ? "Library" : "Camera"}
+            {screen === "camera" ? "Library" : "Back to Camera"}
           </Text>
         </Pressable>
       </View>
 
       {screen === "camera" ? (
         <>
+          {/* Viewfinder Preview */}
           <View style={styles.preview}>
             {photo ? (
-              <Image
-                source={{ uri: photo.uri }}
-                style={styles.previewImage}
-              />
+              <Image source={{ uri: photo.uri }} style={styles.previewImage} />
             ) : (
               <CameraView
                 ref={cameraRef}
@@ -269,11 +272,9 @@ export default function App() {
             )}
           </View>
 
+          {/* Action Bar */}
           <View style={styles.controls}>
-            <Pressable
-              style={styles.sideButton}
-              onPress={choosePhoto}
-            >
+            <Pressable style={styles.sideButton} onPress={choosePhoto}>
               <View style={styles.galleryIcon}>
                 <Text style={styles.galleryGlyph}>▧</Text>
               </View>
@@ -283,9 +284,7 @@ export default function App() {
             <Pressable
               style={styles.shutterOuter}
               onPress={photo ? () => setPhoto(null) : takePhoto}
-              accessibilityLabel={
-                photo ? "Return to camera" : "Take photo"
-              }
+              accessibilityLabel={photo ? "Return to camera" : "Take photo"}
             >
               <View style={styles.shutterInner} />
             </Pressable>
@@ -316,14 +315,9 @@ export default function App() {
       ) : (
         <View style={styles.library}>
           {loadingGallery ? (
-            <ActivityIndicator
-              color="#fff"
-              style={{ marginTop: 30 }}
-            />
+            <ActivityIndicator color="#fff" style={{ marginTop: 30 }} />
           ) : cloudImages.length === 0 ? (
-            <Text style={styles.empty}>
-              No saved images yet.
-            </Text>
+            <Text style={styles.empty}>No saved images in Telegram yet.</Text>
           ) : (
             <FlatList
               data={cloudImages}
@@ -340,7 +334,7 @@ export default function App() {
                       mimeType: item.mime_type,
                     });
                     setScreen("camera");
-                    setMessage("Cloud image selected.");
+                    setMessage("Cloud image loaded.");
                   }}
                 >
                   <Image
@@ -361,15 +355,16 @@ export default function App() {
         </View>
       )}
 
-      <Text style={styles.footer}>
-        Private Telegram image library
-      </Text>
+      <Text style={styles.footer}>Private Telegram Storage</Text>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: "#000" },
+  root: {
+    flex: 1,
+    backgroundColor: "#000",
+  },
   center: {
     flex: 1,
     backgroundColor: "#000",
@@ -379,24 +374,31 @@ const styles = StyleSheet.create({
     padding: 24,
   },
   header: {
-    height: 64,
+    height: 56,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    paddingHorizontal: 22,
+    paddingHorizontal: 20,
   },
   title: {
     color: "#fff",
-    fontSize: 21,
-    fontWeight: "600",
+    fontSize: 22,
+    fontWeight: "700",
   },
-  link: { color: "#60A5FA", fontSize: 15 },
-  secondary: { color: "#aaa" },
+  link: {
+    color: "#60A5FA",
+    fontSize: 16,
+    fontWeight: "500",
+  },
+  secondary: {
+    color: "#aaa",
+    textAlign: "center",
+  },
   preview: {
     flex: 1,
-    marginHorizontal: 8,
+    marginHorizontal: 10,
     backgroundColor: "#151515",
-    borderRadius: 18,
+    borderRadius: 20,
     overflow: "hidden",
   },
   previewImage: {
@@ -406,71 +408,92 @@ const styles = StyleSheet.create({
   },
   retake: {
     position: "absolute",
-    bottom: 18,
+    bottom: 20,
     alignSelf: "center",
     paddingVertical: 10,
-    paddingHorizontal: 20,
+    paddingHorizontal: 22,
     borderRadius: 24,
-    backgroundColor: "#222D",
+    backgroundColor: "rgba(30, 30, 30, 0.8)",
   },
-  retakeText: { color: "#fff" },
+  retakeText: {
+    color: "#fff",
+    fontSize: 15,
+    fontWeight: "600",
+  },
   controls: {
-    height: 124,
+    height: 110,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-around",
     paddingHorizontal: 16,
   },
   sideButton: {
-    width: 64,
+    width: 60,
     alignItems: "center",
-    gap: 7,
+    gap: 6,
   },
   galleryIcon: {
     width: 46,
     height: 46,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: "#aaa",
+    borderRadius: 12,
+    borderWidth: 1.5,
+    borderColor: "#888",
     justifyContent: "center",
     alignItems: "center",
   },
-  galleryGlyph: { color: "#fff", fontSize: 27 },
+  galleryGlyph: {
+    color: "#fff",
+    fontSize: 24,
+  },
   shutterOuter: {
     width: 76,
     height: 76,
-    borderWidth: 5,
+    borderWidth: 4,
     borderColor: "#fff",
-    borderRadius: 40,
+    borderRadius: 38,
     justifyContent: "center",
     alignItems: "center",
   },
   shutterInner: {
-    width: 60,
-    height: 60,
-    borderRadius: 32,
+    width: 62,
+    height: 62,
+    borderRadius: 31,
     backgroundColor: "#fff",
   },
   sendCircle: {
     width: 46,
     height: 46,
-    borderRadius: 24,
+    borderRadius: 23,
     backgroundColor: "#fff",
     alignItems: "center",
     justifyContent: "center",
   },
-  sendGlyph: { color: "#000", fontSize: 29, fontWeight: "600" },
-  dimmed: { opacity: 0.35 },
-  label: { color: "#ddd", fontSize: 11 },
+  sendGlyph: {
+    color: "#000",
+    fontSize: 26,
+    fontWeight: "bold",
+  },
+  dimmed: {
+    opacity: 0.35,
+  },
+  label: {
+    color: "#ccc",
+    fontSize: 12,
+  },
   status: {
-    minHeight: 30,
+    minHeight: 24,
     color: "#aaa",
     textAlign: "center",
-    fontSize: 12,
-    paddingHorizontal: 12,
+    fontSize: 13,
+    paddingHorizontal: 16,
+    marginBottom: 4,
   },
-  library: { flex: 1 },
-  grid: { padding: 3 },
+  library: {
+    flex: 1,
+  },
+  grid: {
+    padding: 3,
+  },
   tile: {
     width: "33.333%",
     aspectRatio: 1,
@@ -479,27 +502,35 @@ const styles = StyleSheet.create({
   tileImage: {
     width: "100%",
     height: "100%",
-    borderRadius: 4,
+    borderRadius: 6,
     backgroundColor: "#191919",
   },
-  empty: { color: "#888", textAlign: "center", marginTop: 50 },
-  libraryFooter: {
+  empty: {
     color: "#888",
+    textAlign: "center",
+    marginTop: 60,
+    fontSize: 15,
+  },
+  libraryFooter: {
+    color: "#666",
     fontSize: 12,
     textAlign: "center",
-    padding: 12,
+    padding: 10,
   },
   footer: {
-    color: "#555",
-    fontSize: 10,
+    color: "#444",
+    fontSize: 11,
     textAlign: "center",
-    paddingBottom: 10,
+    paddingBottom: 8,
   },
   primaryButton: {
     backgroundColor: "#fff",
-    paddingHorizontal: 22,
+    paddingHorizontal: 24,
     paddingVertical: 12,
-    borderRadius: 25,
+    borderRadius: 24,
   },
-  primaryText: { color: "#000", fontWeight: "600" },
+  primaryText: {
+    color: "#000",
+    fontWeight: "700",
+  },
 });
