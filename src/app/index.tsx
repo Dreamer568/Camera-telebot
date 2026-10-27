@@ -106,6 +106,7 @@ export default function App() {
     setScreen("camera");
   }
 
+  
   async function sendPhoto() {
     if (!photo || loading) return;
 
@@ -115,19 +116,25 @@ export default function App() {
     try {
       const form = new FormData();
 
-      // Normalize file URI format across iOS and Android
-      let fileUri = photo.uri;
-      if (Platform.OS === "ios" && !fileUri.startsWith("file://")) {
-        fileUri = `file://${fileUri}`;
+      if (Platform.OS === "web") {
+        // On Web, convert data URL / blob URI into an actual Blob
+        const res = await fetch(photo.uri);
+        const blob = await res.blob();
+        form.append("photo", blob, photo.name || "photo.jpg");
+      } else {
+        // On iOS / Android, React Native requires the { uri, name, type } object
+        let fileUri = photo.uri;
+        if (Platform.OS === "ios" && !fileUri.startsWith("file://")) {
+          fileUri = `file://${fileUri}`;
+        }
+
+        form.append("photo", {
+          uri: fileUri,
+          name: photo.name || `photo-${Date.now()}.jpg`,
+          type: photo.mimeType || "image/jpeg",
+        } as any);
       }
 
-      form.append("photo", {
-        uri: fileUri,
-        name: photo.name || `image-${Date.now()}.jpg`,
-        type: photo.mimeType || "image/jpeg",
-      } as any);
-
-      // Do NOT set "Content-Type". Let fetch generate the multipart boundary.
       const response = await fetch(`${API_URL}/upload`, {
         method: "POST",
         headers: {
@@ -141,8 +148,8 @@ export default function App() {
       if (!response.ok) {
         throw new Error(
           data?.error ||
-            data?.detail ||
-            `Server returned status ${response.status}`
+          data?.detail ||
+          `Server returned status ${response.status}`
         );
       }
 
@@ -155,17 +162,11 @@ export default function App() {
       await loadCloudGallery(false);
     } catch (error: any) {
       console.error("Upload error details:", error);
-      const isNetworkError = error?.message?.includes("fetch failed");
-      setMessage(
-        isNetworkError
-          ? "Fetch failed: Render is waking up or URL/Key is incorrect."
-          : error.message || "Upload failed."
-      );
+      setMessage(error?.message || "Upload failed.");
     } finally {
       setLoading(false);
     }
   }
-
   async function loadCloudGallery(showErrors = true) {
     setLoadingGallery(true);
 

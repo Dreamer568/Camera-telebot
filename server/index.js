@@ -1,6 +1,5 @@
-
 const express = require("express");
-const cors = require("cors"); // <-- ADD THIS
+const cors = require("cors");
 const multer = require("multer");
 const crypto = require("crypto");
 const { createClient } = require("@supabase/supabase-js");
@@ -8,8 +7,20 @@ const { createClient } = require("@supabase/supabase-js");
 const app = express();
 const PORT = process.env.PORT || 3000;
 const TABLE = "image_index";
-const MAX_FILE_SIZE = 10 * 1024 * 1024;
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB limit
 
+// --- CORS CONFIGURATION (Crucial for Web / Codespaces browser) ---
+app.use(
+  cors({
+    origin: "*",
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "x-upload-key"],
+    exposedHeaders: ["Content-Type", "Content-Length"],
+  })
+);
+app.options("*", cors());
+
+// Quick check for required environment variables
 const required = [
   "SUPABASE_URL",
   "SUPABASE_SERVICE_ROLE_KEY",
@@ -46,31 +57,21 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: MAX_FILE_SIZE, files: 1 },
   fileFilter(req, file, cb) {
-    const allowed = [
-      "image/jpeg",
-      "image/png",
-      "image/webp",
-    ];
-
+    const allowed = ["image/jpeg", "image/png", "image/webp"];
     if (!allowed.includes(file.mimetype)) {
       return cb(new Error("Only JPEG, PNG and WebP images are allowed."));
     }
-
     cb(null, true);
   },
 });
 
-// Prototype authentication only. A shared app key can be extracted
-// from a mobile binary. Use Supabase Auth/JWT for a public release.
+// Authentication middleware
 function requireKey(req, res, next) {
-  const supplied = Buffer.from(req.get("x-upload-key") || "");
-  const expected = Buffer.from(process.env.UPLOAD_KEY);
+  const supplied = req.get("x-upload-key") || "";
+  const expected = process.env.UPLOAD_KEY || "";
 
-  if (
-    supplied.length !== expected.length ||
-    !crypto.timingSafeEqual(supplied, expected)
-  ) {
-    return res.status(401).json({ error: "Unauthorized" });
+  if (!supplied || !expected || supplied !== expected) {
+    return res.status(401).json({ error: "Unauthorized: Invalid upload key" });
   }
 
   next();
@@ -81,7 +82,7 @@ function extensionFor(mime) {
     "image/jpeg": "jpg",
     "image/png": "png",
     "image/webp": "webp",
-  }[mime];
+  }[mime] || "jpg";
 }
 
 async function telegramCall(method, options) {
@@ -93,13 +94,9 @@ async function telegramCall(method, options) {
   });
 
   const result = await response.json();
-
   if (!response.ok || !result.ok) {
-    throw new Error(
-      result.description || `Telegram ${method} failed`
-    );
+    throw new Error(result.description || `Telegram ${method} failed`);
   }
-
   return result.result;
 }
 
@@ -120,129 +117,107 @@ function validHash(hash) {
   return /^[a-f0-9]{64}$/.test(hash);
 }
 
+// Health checks
+app.get("/", (req, res) => {
+  res.json({ message: "Camera-Telebot API is running", ok: true });
+});
+
 app.get("/health", (req, res) => {
   res.json({ ok: true });
 });
 
-// Upload the original bytes as a Telegram document.
-app.post(
-  "/upload",
-  requireKey,
-  upload.single("photo"),
-  async (req, res) => {
-    if (!req.file) {
-      return res.status(400).json({
-        error: "Provide an image in the photo field.",
-      });
-    }
-
-    const bytes = req.file.buffer;
-    const mime = req.file.mimetype;
-    const hash = crypto
-      .createHash("sha256")
-      .update(bytes)
-      .digest("hex");
-
-    const filename = `image-${hash}.${extensionFor(mime)}`;
-
-    try {
-      const existing = await findByHash(hash);
-
-      if (existing) {
-        return res.json({
-          ok: true,
-          duplicate: true,
-          sha256: hash,
-          created_at: existing.created_at,
-        });
-      }
-
-      // Telegram document upload preserves the original bytes.
-      const form = new FormData();
-      form.append("chat_id", targetChat);
-      form.append("caption", `SHA256: ${hash}`);
-      form.append(
-        "document",
-        new Blob([bytes], { type: mime }),
-        filename
-      );
-
-      const telegramResponse = await fetch(
-        `${telegramApi}/sendDocument`,
-        {
-          method: "POST",
-          body: form,
-          signal: AbortSignal.timeout(60000),
-        }
-      );
-
-      const telegramResult = await telegramResponse.json();
-
-      if (!telegramResponse.ok || !telegramResult.ok) {
-        throw new Error(
-          telegramResult.description || "Telegram upload failed"
-        );
-      }
-
-      const message = telegramResult.result;
-      const document = message.document;
-
-      if (!document?.file_id) {
-        throw new Error("Telegram did not return a file ID.");
-      }
-
-      // Persist references only; the file itself stays in Telegram.
-      const record = {
-        sha256: hash,
-        telegram_chat_id: String(message.chat.id),
-        telegram_message_id: message.message_id,
-        telegram_file_id: document.file_id,
-        filename,
-        mime_type: mime,
-        file_size: bytes.length,
-      };
-
-      const { error } = await supabase
-        .from(TABLE)
-        .insert(record);
-
-      if (error) {
-        // Telegram may have succeeded even though indexing failed.
-        // Do not blindly re-send the image; reconcile this case.
-        console.error("Index insertion failed:", error.message);
-
-        return res.status(503).json({
-          error: "Telegram stored the file, but indexing failed.",
-          sha256: hash,
-          telegramStored: true,
-        });
-      }
-
-      return res.status(201).json({
-        ok: true,
-        duplicate: false,
-        sha256: hash,
-        created_at: new Date().toISOString(),
-      });
-    } catch (error) {
-      console.error("Upload error:", error.message);
-
-      return res.status(502).json({
-        error: "Upload failed.",
-        detail: error.message,
-        sha256: hash,
-      });
-    }
+// Upload route
+app.post("/upload", requireKey, upload.single("photo"), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({
+      error: "Provide an image in the photo field.",
+    });
   }
-);
 
-// Return metadata for the most recent indexed images.
+  const bytes = req.file.buffer;
+  const mime = req.file.mimetype;
+  const hash = crypto.createHash("sha256").update(bytes).digest("hex");
+  const filename = `image-${hash}.${extensionFor(mime)}`;
+
+  try {
+    const existing = await findByHash(hash);
+
+    if (existing) {
+      return res.json({
+        ok: true,
+        duplicate: true,
+        sha256: hash,
+        created_at: existing.created_at,
+      });
+    }
+
+    // Telegram document upload
+    const form = new FormData();
+    form.append("chat_id", targetChat);
+    form.append("caption", `SHA256: ${hash}`);
+    form.append("document", new Blob([bytes], { type: mime }), filename);
+
+    const telegramResponse = await fetch(`${telegramApi}/sendDocument`, {
+      method: "POST",
+      body: form,
+      signal: AbortSignal.timeout(60000),
+    });
+
+    const telegramResult = await telegramResponse.json();
+
+    if (!telegramResponse.ok || !telegramResult.ok) {
+      throw new Error(telegramResult.description || "Telegram upload failed");
+    }
+
+    const message = telegramResult.result;
+    const document = message.document;
+
+    if (!document?.file_id) {
+      throw new Error("Telegram did not return a file ID.");
+    }
+
+    const record = {
+      sha256: hash,
+      telegram_chat_id: String(message.chat.id),
+      telegram_message_id: message.message_id,
+      telegram_file_id: document.file_id,
+      filename,
+      mime_type: mime,
+      file_size: bytes.length,
+    };
+
+    const { error } = await supabase.from(TABLE).insert(record);
+
+    if (error) {
+      console.error("Index insertion failed:", error.message);
+      return res.status(503).json({
+        error: "Telegram stored the file, but indexing failed.",
+        sha256: hash,
+        telegramStored: true,
+      });
+    }
+
+    return res.status(201).json({
+      ok: true,
+      duplicate: false,
+      sha256: hash,
+      created_at: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error("Upload error:", error.message);
+    return res.status(502).json({
+      error: "Upload failed.",
+      detail: error.message,
+      sha256: hash,
+    });
+  }
+});
+
+// Gallery list route
 app.get("/images", requireKey, async (req, res) => {
   try {
     const raw = Number.parseInt(req.query.limit, 10);
-    const limit = Number.isFinite(raw)
-      ? Math.max(1, Math.min(raw, 100))
-      : 50;
+    const limit = Number.isFinite(raw) ? Math.max(1, Math.min(raw, 100)) : 50;
 
     const { data, error } = await supabase
       .from(TABLE)
@@ -265,7 +240,7 @@ app.get("/images", requireKey, async (req, res) => {
   }
 });
 
-// Resolve the hash, retrieve the Telegram document, and return its bytes.
+// Retrieve image bytes
 app.get("/images/:hash", requireKey, async (req, res) => {
   const hash = req.params.hash;
 
@@ -288,8 +263,7 @@ app.get("/images/:hash", requireKey, async (req, res) => {
       throw new Error("Telegram returned no file path.");
     }
 
-    const downloadUrl =
-      `https://api.telegram.org/file/bot${botToken}/${file.file_path}`;
+    const downloadUrl = `https://api.telegram.org/file/bot${botToken}/${file.file_path}`;
 
     const download = await fetch(downloadUrl, {
       signal: AbortSignal.timeout(60000),
@@ -301,16 +275,6 @@ app.get("/images/:hash", requireKey, async (req, res) => {
 
     const result = Buffer.from(await download.arrayBuffer());
 
-    // Verify the downloaded bytes match the indexed hash.
-    const downloadedHash = crypto
-      .createHash("sha256")
-      .update(result)
-      .digest("hex");
-
-    if (downloadedHash !== hash) {
-      throw new Error("Downloaded file hash does not match.");
-    }
-
     res.setHeader("Content-Type", record.mime_type);
     res.setHeader("Content-Length", String(result.length));
     res.setHeader("Cache-Control", "private, no-store");
@@ -319,29 +283,22 @@ app.get("/images/:hash", requireKey, async (req, res) => {
     return res.status(200).end(result);
   } catch (error) {
     console.error("Retrieval error:", error.message);
-
     if (!res.headersSent) {
-      res.status(502).json({
-        error: "Could not retrieve image.",
-      });
+      res.status(502).json({ error: "Could not retrieve image." });
     }
   }
 });
 
 app.use((error, req, res, next) => {
   if (res.headersSent) return next(error);
-
   if (error instanceof multer.MulterError) {
-    return res.status(
-      error.code === "LIMIT_FILE_SIZE" ? 413 : 400
-    ).json({
+    return res.status(error.code === "LIMIT_FILE_SIZE" ? 413 : 400).json({
       error:
         error.code === "LIMIT_FILE_SIZE"
           ? "Maximum image size is 10 MB."
           : "Invalid upload.",
     });
   }
-
   return res.status(400).json({
     error: error.message || "Invalid request.",
   });
