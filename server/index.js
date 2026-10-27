@@ -1,5 +1,6 @@
 
 const express = require("express");
+const cors = require("cors"); // <-- ADD THIS
 const multer = require("multer");
 const crypto = require("crypto");
 const { createClient } = require("@supabase/supabase-js");
