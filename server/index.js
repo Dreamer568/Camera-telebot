@@ -9,7 +9,7 @@ const PORT = process.env.PORT || 3000;
 const TABLE = "image_index";
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB limit
 
-// --- CORS CONFIGURATION (Crucial for Web / Codespaces browser) ---
+// --- CORS CONFIGURATION (Works with Express 5) ---
 app.use(
   cors({
     origin: "*",
@@ -18,7 +18,6 @@ app.use(
     exposedHeaders: ["Content-Type", "Content-Length"],
   })
 );
-app.options("*", cors());
 
 // Quick check for required environment variables
 const required = [
@@ -78,11 +77,13 @@ function requireKey(req, res, next) {
 }
 
 function extensionFor(mime) {
-  return {
-    "image/jpeg": "jpg",
-    "image/png": "png",
-    "image/webp": "webp",
-  }[mime] || "jpg";
+  return (
+    {
+      "image/jpeg": "jpg",
+      "image/png": "png",
+      "image/webp": "webp",
+    }[mime] || "jpg"
+  );
 }
 
 async function telegramCall(method, options) {
